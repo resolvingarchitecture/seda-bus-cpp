@@ -107,9 +107,9 @@ class Channel {
 public:
     Channel(std::string name, ChannelConfig cfg)
         : name_(std::move(name)),
-          cfg_(cfg),
-          permits_(cfg.concurrency),
-          queue_(cfg.capacity, cfg.max_attempts > 1 ? cfg.concurrency : 0) {}
+          cfg_(NormalizeConfig(cfg)),
+          permits_(cfg_.concurrency),
+          queue_(cfg_.capacity, cfg_.max_attempts > 1 ? cfg_.concurrency : 0) {}
 
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
@@ -214,6 +214,22 @@ public:
     }
 
 private:
+    // ChannelConfig's fields are public and can be set directly, bypassing
+    // Capacity()/Concurrency()/MaxAttempts()'s clamping (a real gap an
+    // independent production-readiness audit flagged). capacity=0 in
+    // particular isn't just "always rejects": under Backpressure::Block,
+    // TwoLockQueue's `while (size_ >= capacity_)` can never become false
+    // (size_ is unsigned, never negative), so Push hangs forever - a
+    // genuine silent misbehavior, not a documented one. Clamp here, at the
+    // one place every Channel actually gets built, so the invariant holds
+    // no matter how the caller constructed ChannelConfig.
+    static ChannelConfig NormalizeConfig(ChannelConfig cfg) {
+        cfg.capacity = std::max<size_t>(1, cfg.capacity);
+        cfg.concurrency = std::max<size_t>(1, cfg.concurrency);
+        cfg.max_attempts = std::max<uint32_t>(1, cfg.max_attempts);
+        return cfg;
+    }
+
     std::string name_;
     ChannelConfig cfg_;
 

@@ -96,6 +96,25 @@ ctest --test-dir build --output-on-failure
 `RA_COMMON_BUILD_TESTS` forced off, so its test/doctest target doesn't build
 twice.
 
+## Correctness suite coverage
+
+See [`seda-bus/CORRECTNESS_SUITE.md`](../CORRECTNESS_SUITE.md) for what
+C1–C7 mean. All in `tests/test_bus.cpp` unless noted.
+
+| # | Property | Test case(s) |
+|---|----------|---------------|
+| C1 | Backpressure: Block / Reject / DropNewest / DropOldest | `"backpressure Block waits for room instead of rejecting"`, `"backpressure rejects when the queue is full"`, `"backpressure DropNewest matches Reject's contract when full"`, `"backpressure DropOldest always admits by evicting the front"` |
+| C2 | Retry → dead-letter | `"nack retries then dead-letters"`, `"nack then succeeds on the final attempt delivers exactly once"`, `"a channel with no consumers dead-letters immediately"` |
+| C3 | Consumer failure isolation | `"a consumer that throws on every third envelope doesn't take down the bus"` |
+| C4 | Shutdown accounting | `"shutdown accounting: drained implies delivered + dead_lettered == published"`, `"shutdown accounting holds even when the timeout expires first"` |
+| C5 | Config validation | `"config validation: capacity/concurrency/max_attempts are clamped, never zero"` (both the fluent builder and a raw-struct bypass — see `Channel::NormalizeConfig` in `bus.hpp`) |
+| C6 | No resource leak across repeated lifecycles | `"no thread-count growth across repeated bus lifecycles"` (`/proc/self/status`, Linux-only; skips with a `WARN` elsewhere) |
+| C7 | Concurrency correctness | `"concurrent producers deliver exactly once"` |
+
+`tests/test_two_lock_queue.cpp` additionally unit-tests `TwoLockQueue`'s
+`PushFront` headroom-overflow guard directly — a lower-level invariant check
+underneath C2/C6, not itself one of C1–C7.
+
 ## What this is not
 
 SEDA's original design also included a **controller** that watched per-stage
