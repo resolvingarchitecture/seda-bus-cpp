@@ -19,6 +19,7 @@
 
 #include "seda_bus/envelope.hpp"
 #include "seda_bus/pool.hpp"
+#include "seda_bus/two_lock_queue.hpp"
 
 // The bus: a registry of stages drained by one shared worker pool.
 
@@ -105,7 +106,10 @@ inline void Warn(const std::string& msg) { std::cerr << "[seda_bus] " << msg << 
 class Channel {
 public:
     Channel(std::string name, ChannelConfig cfg)
-        : name_(std::move(name)), cfg_(cfg), permits_(cfg.concurrency) {}
+        : name_(std::move(name)),
+          cfg_(cfg),
+          permits_(cfg.concurrency),
+          queue_(cfg.capacity, cfg.max_attempts > 1 ? cfg.concurrency : 0) {}
 
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
@@ -113,56 +117,49 @@ public:
     const std::string& Name() const { return name_; }
     const ChannelConfig& Config() const { return cfg_; }
 
-    size_t Depth() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
-    }
+    size_t Depth() const { return queue_.Size(); }
 
     // Admit an envelope, honouring the stage's back-pressure policy. `deadline`
     // is absent for an unbounded wait under Block, or a point in time after
     // which admission gives up.
+    //
+    // Push/Poll use separate head/tail locks (TwoLockQueue) rather than one
+    // mutex guarding both ends - see two_lock_queue.hpp's doc comment for
+    // why (a real, Docker-specific `par` throughput collapse under the
+    // single-mutex design - seda-bus-compare/RESULTS.md).
     bool Offer(Envelope env, std::optional<std::chrono::steady_clock::time_point> deadline) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        while (queue_.size() >= cfg_.capacity) {
-            if (cfg_.backpressure == Backpressure::Reject || cfg_.backpressure == Backpressure::DropNewest) {
-                dropped_.fetch_add(1, std::memory_order_relaxed);
-                return false;
-            }
-            if (cfg_.backpressure == Backpressure::DropOldest) {
-                queue_.pop_front();
-                dropped_.fetch_add(1, std::memory_order_relaxed);
+        using OnFull = TwoLockQueue<Envelope>::OnFull;
+        OnFull on_full = OnFull::Block;
+        switch (cfg_.backpressure) {
+            case Backpressure::Reject:
+            case Backpressure::DropNewest:
+                on_full = OnFull::Reject;
                 break;
-            }
-            // Block.
-            if (!deadline) {
-                not_full_.wait(lock);
-            } else {
-                auto now = std::chrono::steady_clock::now();
-                if (now >= *deadline) {
-                    dropped_.fetch_add(1, std::memory_order_relaxed);
-                    return false;
-                }
-                not_full_.wait_until(lock, *deadline);
-            }
+            case Backpressure::DropOldest:
+                on_full = OnFull::DropOldest;
+                break;
+            case Backpressure::Block:
+                on_full = OnFull::Block;
+                break;
         }
-        queue_.push_back(std::move(env));
-        enqueued_.fetch_add(1, std::memory_order_relaxed);
-        return true;
+        bool ok = queue_.Push(
+            std::move(env), on_full,
+            [&deadline] {
+                if (!deadline) return false;  // wait indefinitely
+                return std::chrono::steady_clock::now() >= *deadline;
+            },
+            [this](Envelope) { dropped_.fetch_add(1, std::memory_order_relaxed); });
+        if (ok) {
+            enqueued_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return ok;
     }
 
-    std::optional<Envelope> Poll() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (queue_.empty()) return std::nullopt;
-        Envelope env = std::move(queue_.front());
-        queue_.pop_front();
-        not_full_.notify_one();
-        return env;
-    }
+    std::optional<Envelope> Poll() { return queue_.Pop(); }
 
-    void Requeue(Envelope env) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push_front(std::move(env));
-    }
+    void Requeue(Envelope env) { queue_.PushFront(std::move(env)); }
 
     bool TryAcquire() {
         size_t cur = permits_.load(std::memory_order_acquire);
@@ -220,9 +217,7 @@ private:
     std::string name_;
     ChannelConfig cfg_;
 
-    mutable std::mutex mutex_;
-    std::condition_variable not_full_;
-    std::deque<Envelope> queue_;
+    TwoLockQueue<Envelope> queue_;
 
     mutable std::shared_mutex consumers_mutex_;
     std::vector<Consumer> consumers_;
