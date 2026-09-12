@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -91,14 +92,40 @@ public:
         return true;
     }
 
-    // Simple push with no capacity check - used by Requeue (nack retry),
+    // No capacity check against `capacity_` - used by Requeue (nack retry),
     // which must never be dropped by the same policy governing fresh
     // admission. Rare path (only when max_attempts > 1) - takes both locks.
+    //
+    // Still guards the true physical bound (`slots_.size()`), found missing
+    // by an independent production-readiness audit: `requeue_headroom` (see
+    // the constructor) is sized to the channel's `concurrency`, on the
+    // invariant that at most that many envelopes can be popped-but-not-yet-
+    // acked at once. If that invariant is ever violated - a future caller
+    // sizing headroom below its actual concurrency, say - blindly backing
+    // `head_` up and overwriting slots_[head_] would silently corrupt a
+    // still-live entry (stale data returned by a later Pop, and `size_` no
+    // longer matching what's actually live) instead of failing loudly. If
+    // genuinely full, evict the current oldest entry first - the same safe
+    // drop Push's DropOldest path already uses - so the buffer stays
+    // internally consistent: a dropped envelope and a loud stderr warning
+    // beat corrupted queue state.
     void PushFront(T value) {
         std::lock_guard<std::mutex> tlock(tail_mutex_);
         std::lock_guard<std::mutex> hlock(head_mutex_);
+        if (size_.load(std::memory_order_acquire) >= slots_.size()) {
+            std::fprintf(stderr,
+                "[seda_bus] TwoLockQueue::PushFront: no requeue headroom "
+                "left (capacity=%zu, slots=%zu) - dropping the oldest entry "
+                "instead of corrupting the buffer. requeue_headroom is "
+                "undersized for this channel's actual concurrency.\n",
+                capacity_, slots_.size());
+            PopFrontLocked();
+        }
         // head_ points one-before-the-front; back it up by one slot and
-        // place the requeued value there, so it's the next Pop().
+        // place the requeued value there, so it's the next Pop(). (When the
+        // guard above just evicted the true front, this reclaims exactly
+        // that freed slot: PopFrontLocked advanced head_ forward past it,
+        // so Prev(head_) here lands back on it.)
         head_ = Prev(head_);
         slots_[head_] = std::move(value);
         size_.fetch_add(1, std::memory_order_acq_rel);
