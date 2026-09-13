@@ -98,7 +98,7 @@ twice.
 
 ## Correctness suite coverage
 
-See [`seda-bus-design/CORRECTNESS_SUITE.md`](../seda-bus-design/CORRECTNESS_SUITE.md) for what
+See [`seda-bus-design/CORRECTNESS_SUITE.md`](https://github.com/resolvingarchitecture/seda-bus-design/blob/master/CORRECTNESS_SUITE.md) for what
 C1–C7 mean. All in `tests/test_bus.cpp` unless noted.
 
 | # | Property | Test case(s) |
@@ -121,7 +121,7 @@ SEDA's original design also included a **controller** that watched per-stage
 latency and queue depth at runtime and re-tuned thread allocation and shed
 load automatically. That adaptive controller is not implemented here — every
 setting is static configuration. See the shared
-[`seda-bus-design/DESIGN.md`](../seda-bus-design/DESIGN.md) §3 for what a `2.0` controller would need.
+[`seda-bus-design`](https://github.com/resolvingarchitecture/seda-bus-design) §3 for what a `2.0` controller would need.
 
 ## Companion implementations
 
@@ -135,5 +135,5 @@ hand-rolled pool, atomic-CAS permits) but `seda-bus-python`/`-ts`'s envelope
 choice (`ra-common`'s `Envelope`, not a standalone one) — Rust is the one
 outlier still pending that rewire.
 
-See [`seda-bus-design/DESIGN.md`](../seda-bus-design/DESIGN.md) for the shared design and a full
+See [`seda-bus-design`](https://github.com/resolvingarchitecture/seda-bus-design) for the shared design and a full
 comparison table across all five ports.
